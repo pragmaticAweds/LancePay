@@ -3,6 +3,21 @@ import { prisma } from '@/lib/db'
 import { verifyAuthToken } from '@/lib/auth'
 import { generateInvoiceNumber } from '@/lib/utils'
 
+async function getAuthenticatedUser(request: NextRequest) {
+  const authToken = request.headers.get('authorization')?.replace('Bearer ', '')
+  const claims = await verifyAuthToken(authToken || '')
+  if (!claims) {
+    return { error: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) }
+  }
+
+  const user = await prisma.user.findUnique({ where: { privyId: claims.userId } })
+  if (!user) {
+    return { error: NextResponse.json({ error: 'User not found' }, { status: 404 }) }
+  }
+
+  return { user }
+}
+
 async function getUniqueInvoiceNumber() {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const invoiceNumber = generateInvoiceNumber()
@@ -19,16 +34,67 @@ async function getUniqueInvoiceNumber() {
   throw new Error('Failed to generate a unique invoice number')
 }
 
-export async function POST(request: NextRequest) {
-  const authToken = request.headers.get('authorization')?.replace('Bearer ', '')
-  const claims = await verifyAuthToken(authToken || '')
-  if (!claims) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+export async function GET(request: NextRequest) {
+  const auth = await getAuthenticatedUser(request)
+  if ('error' in auth) {
+    return auth.error
   }
 
-  const user = await prisma.user.findUnique({ where: { privyId: claims.userId } })
-  if (!user) {
-    return NextResponse.json({ error: 'User not found' }, { status: 404 })
+  const { searchParams } = new URL(request.url)
+  const status = searchParams.get('status')
+  const page = Math.max(1, Number.parseInt(searchParams.get('page') || '1', 10) || 1)
+  const limit = Math.min(
+    50,
+    Math.max(1, Number.parseInt(searchParams.get('limit') || '20', 10) || 20),
+  )
+
+  const validStatuses = ['pending', 'paid', 'overdue', 'cancelled']
+  if (status && !validStatuses.includes(status)) {
+    return NextResponse.json({ error: 'Invalid status' }, { status: 400 })
+  }
+
+  const where = {
+    userId: auth.user.id,
+    ...(status ? { status } : {}),
+  }
+
+  const total = await prisma.invoice.count({ where })
+  const invoices = await prisma.invoice.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    skip: (page - 1) * limit,
+    take: limit,
+    select: {
+      id: true,
+      invoiceNumber: true,
+      clientName: true,
+      clientEmail: true,
+      amount: true,
+      currency: true,
+      status: true,
+      dueDate: true,
+      createdAt: true,
+    },
+  })
+
+  return NextResponse.json({
+    invoices: invoices.map((invoice) => ({
+      ...invoice,
+      amount: Number(invoice.amount),
+    })),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    },
+  })
+}
+
+export async function POST(request: NextRequest) {
+  const auth = await getAuthenticatedUser(request)
+  if ('error' in auth) {
+    return auth.error
   }
 
   const body = await request.json()
@@ -60,7 +126,7 @@ export async function POST(request: NextRequest) {
 
   const invoice = await prisma.invoice.create({
     data: {
-      userId: user.id,
+      userId: auth.user.id,
       invoiceNumber,
       clientEmail: String(clientEmail).toLowerCase(),
       clientName: clientName || null,
