@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { verifyAuthToken } from "@/lib/auth";
 import { logger } from "@/lib/logger";
-import { parseUtcDateRange } from "../../_lib/date-range";
+import { parseTzDateRange } from "../../_lib/date-range";
 
 const GROUP_BY_TO_DATE_TRUNC: Record<string, "day" | "week" | "month"> = {
   day: "day",
@@ -26,13 +26,14 @@ export async function GET(request: NextRequest) {
 
     const user = await prisma.user.findUnique({
       where: { privyId: claims.userId },
+      select: { id: true, timezone: true },
     });
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
     const url = new URL(request.url);
-    const parsedRange = parseUtcDateRange(url.searchParams);
+    const parsedRange = parseTzDateRange(url.searchParams, user.timezone);
     if (!parsedRange.ok) {
       return NextResponse.json(parsedRange.error, { status: 400 });
     }
@@ -46,7 +47,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const { from, toExclusive } = parsedRange.value;
+    const { from, toExclusive, tz } = parsedRange.value;
     const rows = await prisma.$queryRawUnsafe<
       Array<{
         bucket: Date;
@@ -68,7 +69,7 @@ export async function GET(request: NextRequest) {
         AND "createdAt" < $3
       GROUP BY bucket
       ORDER BY bucket ASC
-    `,
+      `,
       user.id,
       from,
       toExclusive,
@@ -76,6 +77,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       groupBy,
+      tz,
       buckets: rows.map((row) => ({
         bucket: row.bucket.toISOString(),
         count: Number(row.count),

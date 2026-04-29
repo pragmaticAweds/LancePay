@@ -7,6 +7,7 @@ import {
   deleteCacheValue,
 } from "../../_lib/cache";
 import { onInvoicePaid } from "../../_lib/events";
+import { isValidTimezone } from "../../_lib/date-range";
 
 const TOP_MONTHS_TTL_MS = 60 * 60 * 1000;
 
@@ -19,10 +20,6 @@ function ensureTopMonthsCacheInvalidationHook() {
   });
 }
 
-/**
- * GET /api/routes-b/analytics/top-months
- * Returns the three calendar months with the highest paid invoice totals for the authenticated user.
- */
 export async function GET(request: NextRequest) {
   ensureTopMonthsCacheInvalidationHook();
   try {
@@ -36,42 +33,53 @@ export async function GET(request: NextRequest) {
 
     const user = await prisma.user.findUnique({
       where: { privyId: claims.userId },
+      select: { id: true, timezone: true },
     });
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
-    const cacheKey = `routes-b:analytics:top-months:${user.id}`;
+
+    const url = new URL(request.url);
+    const rawTz = url.searchParams.get("tz") ?? user.timezone ?? "UTC";
+    if (!isValidTimezone(rawTz)) {
+      return NextResponse.json(
+        {
+          error: "Invalid timezone",
+          fields: { tz: `"${rawTz}" is not a valid IANA timezone name` },
+        },
+        { status: 400 },
+      );
+    }
+
+    const cacheKey = `routes-b:analytics:top-months:${user.id}:${rawTz}`;
     const cached = getCacheValue<{
       topMonths: { month: string; earned: number }[];
+      tz: string;
     }>(cacheKey);
     if (cached) {
       return NextResponse.json(cached, { headers: { "X-Cache": "HIT" } });
     }
 
-    // Fetch all paid invoices for the user
     const paid = await prisma.invoice.findMany({
       where: { userId: user.id, status: "paid" },
       select: { amount: true, paidAt: true },
     });
 
-    // Group by "YYYY-MM" in application code (Prisma does not support month-level groupBy portably)
     const monthly: Record<string, number> = {};
     for (const inv of paid) {
       if (!inv.paidAt) continue;
-      const key = inv.paidAt.toISOString().slice(0, 7); // "2025-01"
+      const key = inv.paidAt
+        .toLocaleDateString("en-CA", { timeZone: rawTz })
+        .slice(0, 7);
       monthly[key] = (monthly[key] ?? 0) + Number(inv.amount);
     }
 
-    // Sort by earned amount descending and take top 3
     const topMonths = Object.entries(monthly)
       .sort(([, a], [, b]) => b - a)
       .slice(0, 3)
-      .map(([month, earned]) => ({
-        month,
-        earned: Number(earned.toFixed(2)),
-      }));
+      .map(([month, earned]) => ({ month, earned: Number(earned.toFixed(2)) }));
 
-    const payload = { topMonths };
+    const payload = { topMonths, tz: rawTz };
     setCacheValue(cacheKey, payload, TOP_MONTHS_TTL_MS);
     return NextResponse.json(payload, { headers: { "X-Cache": "MISS" } });
   } catch (error) {
