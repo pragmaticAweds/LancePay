@@ -2,6 +2,8 @@ import { withRequestId } from '../../_lib/with-request-id'
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { verifyAuthToken } from "@/lib/auth";
+import { toInt, BadRequest } from "../_lib/coerce";
+import { withCompression } from "../_lib/with-compression";
 
 async function GETHandler(request: NextRequest) {
   const authToken = request.headers
@@ -21,10 +23,15 @@ async function GETHandler(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const url = new URL(request.url);
-  const limit = Math.min(
-    50,
-    Math.max(1, parseInt(url.searchParams.get("limit") || "10")),
-  );
+  let limit: number
+  try {
+    limit = toInt(url.searchParams.get("limit"), "limit", { default: 10, min: 1, max: 50 })
+  } catch (err) {
+    if (err instanceof BadRequest) {
+      return NextResponse.json({ error: err.message }, { status: 400 })
+    }
+    throw err
+  }
 
   const grouped = await prisma.invoice.groupBy({
     by: ["clientEmail", "clientName"],
@@ -64,7 +71,7 @@ async function GETHandler(request: NextRequest) {
     };
   });
 
-  return NextResponse.json({ clients });
+  return withCompression(request, NextResponse.json({ clients }));
 }
 
 export const GET = withRequestId(GETHandler)
